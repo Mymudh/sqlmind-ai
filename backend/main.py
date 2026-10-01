@@ -15,24 +15,10 @@ app = FastAPI(
 )
 
 
-origins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174",
-
-    "https://sqlmind-ai-pi.vercel.app",
-    "https://sqlmind-b3lkfk0u0-mymudhss-projects.vercel.app",
-    "https://sqlmind-ai-git-main-mymudhss-projects.vercel.app"
-]
-
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -124,10 +110,7 @@ def query_database(request: QueryRequest):
         if "429" in error_message:
             raise HTTPException(
                 status_code=429,
-                detail=(
-                    "AI API quota exceeded. "
-                    "Please try again later."
-                )
+                detail="AI API quota exceeded. Please try again later."
             )
 
         raise HTTPException(
