@@ -5,10 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .agent import ask_sql_agent
-from .database import (
-    get_database_info,
-    get_table_data
-)
+from .database import get_database_info, get_table_data
 
 
 app = FastAPI(
@@ -24,7 +21,11 @@ origins = [
     "http://localhost:5174",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174"
+    "http://127.0.0.1:5174",
+
+    "https://sqlmind-ai-pi.vercel.app",
+    "https://sqlmind-b3lkfk0u0-mymudhss-projects.vercel.app",
+    "https://sqlmind-ai-git-main-mymudhss-projects.vercel.app"
 ]
 
 
@@ -75,7 +76,6 @@ def health():
 def database():
     try:
         return get_database_info()
-
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -84,18 +84,17 @@ def database():
 
 
 @app.get("/database/{table_name}")
-def table_data(table_name: str):
+def database_table(table_name: str):
     try:
         return get_table_data(
-            table_name
+            table_name,
+            limit=20
         )
-
     except ValueError as error:
         raise HTTPException(
             status_code=400,
             detail=str(error)
         )
-
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -107,15 +106,11 @@ def table_data(table_name: str):
     "/query",
     response_model=QueryResponse
 )
-def query_database(
-    request: QueryRequest
-):
+def query_database(request: QueryRequest):
     try:
-        result = ask_sql_agent(
+        return ask_sql_agent(
             request.question
         )
-
-        return result
 
     except ValueError as error:
         raise HTTPException(
@@ -124,7 +119,6 @@ def query_database(
         )
 
     except Exception as error:
-
         error_message = str(error)
 
         if "429" in error_message:
