@@ -1,12 +1,11 @@
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .agent import ask_sql_agent
 from .database import get_database_info, get_table_data
-
 
 app = FastAPI(
     title="SQLMind AI",
@@ -14,10 +13,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://sqlmind-ai-pi.vercel.app",
+        "https://sqlmind-ai-git-main-mymudhs-projects.vercel.app",
+        "https://sqlmind-j5z9orlio-mymudhs-projects.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -88,30 +92,38 @@ def database_table(table_name: str):
         )
 
 
+@app.options("/query")
+async def query_options(request: Request):
+    return {
+        "status": "ok"
+    }
+
+
 @app.post(
     "/query",
     response_model=QueryResponse
 )
 def query_database(request: QueryRequest):
     try:
-        return ask_sql_agent(
+        result = ask_sql_agent(
             request.question
         )
+
+        return result
+
     except ValueError as error:
         raise HTTPException(
             status_code=400,
             detail=str(error)
         )
+
     except Exception as error:
         error_message = str(error)
 
         if "429" in error_message:
             raise HTTPException(
                 status_code=429,
-                detail=(
-                    "AI API quota exceeded. "
-                    "Please try again later."
-                )
+                detail="AI API quota exceeded. Please try again later."
             )
 
         raise HTTPException(
