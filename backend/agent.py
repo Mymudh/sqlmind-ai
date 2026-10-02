@@ -1,278 +1,207 @@
+import os
 import re
 import time
+from typing import Any
 
 from dotenv import load_dotenv
-
-load_dotenv()
-
-from langchain.agents import create_agent
-from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
 
-from .database import get_database
+from .database_manager import get_database
 from .security import validate_sql
 
 
-model = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash-lite",
-    temperature=0,
-    max_retries=2
-)
+load_dotenv()
 
 
-def extract_text(message):
-    content = getattr(
-        message,
-        "content",
-        ""
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not GOOGLE_API_KEY:
+    raise RuntimeError(
+        "GOOGLE_API_KEY environment variable is not configured."
     )
 
-    if isinstance(content, str):
-        return content
 
-    if isinstance(content, list):
-        parts = []
-
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get(
-                    "text",
-                    ""
-                )
-
-                if text:
-                    parts.append(text)
-
-        return "\n".join(parts)
-
-    return str(content)
+MODEL_NAME = "gemini-3.5-flash-lite"
 
 
-def extract_sql(text):
-    if not text:
-        return ""
+def get_model():
 
-    matches = re.findall(
-        r"```sql\s*(.*?)```",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
+    return ChatGoogleGenerativeAI(
+        model=MODEL_NAME,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0
     )
 
-    if matches:
-        return matches[-1].strip()
 
-    matches = re.findall(
-        r"\bSELECT\b.*?(?:;|$)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    )
+def clean_sql(text: str) -> str:
 
-    if matches:
-        return matches[-1].strip()
+    text = text.strip()
 
-    return ""
-
-
-def clean_sql(sql):
-    if not sql:
-        return ""
-
-    sql = sql.strip()
-
-    sql = re.sub(
-        r"^```sql",
+    text = re.sub(
+        r"```sql",
         "",
-        sql,
+        text,
         flags=re.IGNORECASE
     )
 
-    sql = re.sub(
-        r"```$",
+    text = re.sub(
+        r"```",
         "",
-        sql
+        text
     )
 
-    return sql.strip()
+    text = text.strip()
+
+    if "SQL:" in text.upper():
+
+        parts = re.split(
+            r"SQL:",
+            text,
+            flags=re.IGNORECASE
+        )
+
+        if len(parts) > 1:
+            text = parts[-1].strip()
+
+    return text.strip()
 
 
-def build_agent():
+def generate_sql(question: str) -> str:
 
     database = get_database()
 
-    toolkit = SQLDatabaseToolkit(
-        db=database,
-        llm=model
-    )
+    schema = database.get_table_info()
 
-    toolkit_tools = toolkit.get_tools()
+    model = get_model()
 
-    tools = []
+    prompt = f"""
+You are SQLMind AI, a Text-to-SQL database assistant.
 
-    for current_tool in toolkit_tools:
+Your task is to convert the user's natural language question
+into ONE safe SQLite SELECT query.
 
-        if current_tool.name == "sql_db_query":
-            continue
+DATABASE SCHEMA:
 
-        tools.append(current_tool)
+{schema}
 
-    @tool
-    def safe_sql_query(query: str) -> str:
-        """
-        Execute a read-only SQL SELECT query.
-        Only SELECT statements are allowed.
-        """
+USER QUESTION:
 
-        is_safe, message = validate_sql(
-            query
-        )
+{question}
 
-        if not is_safe:
-            return (
-                f"SQL BLOCKED: {message}"
-            )
+RULES:
 
-        try:
+1. Return only SQL.
+2. Only SELECT queries are allowed.
+3. Never use INSERT.
+4. Never use UPDATE.
+5. Never use DELETE.
+6. Never use DROP.
+7. Never use ALTER.
+8. Never use CREATE.
+9. Never use PRAGMA.
+10. Never generate multiple SQL statements.
+11. Use only tables and columns that exist in the schema.
+12. Use SQLite-compatible SQL.
+13. Do not use markdown.
+14. Do not explain the SQL.
+15. Use JOIN when necessary.
 
-            result = database.run(
-                query
-            )
-
-            return str(result)
-
-        except Exception as error:
-
-            return (
-                "SQL execution error: "
-                f"{error}"
-            )
-
-    tools.append(
-        safe_sql_query
-    )
-
-    system_prompt = """
-You are SQLMind AI, an autonomous Text-to-SQL database agent.
-
-Your task is to answer natural-language questions
-about the currently connected SQLite database.
-
-WORKFLOW:
-
-1. Inspect the database schema when necessary.
-2. Identify the correct tables and columns.
-3. Generate valid SQLite SQL.
-4. Only generate READ-ONLY SELECT queries.
-5. Execute the SQL using safe_sql_query.
-6. If execution fails, inspect the error and correct the SQL.
-7. Return a concise natural-language answer.
-8. Never modify the database.
-
-SECURITY RULES:
-
-- Only SELECT statements are allowed.
-- Never use INSERT.
-- Never use UPDATE.
-- Never use DELETE.
-- Never use DROP.
-- Never use ALTER.
-- Never use CREATE.
-- Never use REPLACE.
-- Never use ATTACH.
-- Never use DETACH.
-- Never use PRAGMA.
-- Never execute multiple SQL statements.
-- Never invent database information.
-
-Use the database tools to inspect the actual schema
-and data before answering questions.
-
-When the user asks for database information,
-always use the actual connected database.
+SQL:
 """
 
-    return create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=system_prompt
-    )
+    response = model.invoke(prompt)
+
+    content = response.content
+
+    if isinstance(content, list):
+        content = " ".join(
+            str(item)
+            for item in content
+        )
+
+    sql = clean_sql(str(content))
+
+    return sql
 
 
-def ask_sql_agent(question):
+def execute_sql(sql: str):
+
+    database = get_database()
+
+    valid, message = validate_sql(sql)
+
+    if not valid:
+        raise ValueError(message)
+
+    return database.run(sql)
+
+
+def generate_answer(
+    question: str,
+    sql: str,
+    result: Any
+) -> str:
+
+    model = get_model()
+
+    prompt = f"""
+You are SQLMind AI.
+
+Answer the user's database question using the SQL query
+and database result.
+
+USER QUESTION:
+{question}
+
+SQL QUERY:
+{sql}
+
+DATABASE RESULT:
+{result}
+
+Rules:
+
+1. Give a clear natural-language answer.
+2. Use only the supplied database result.
+3. Do not invent information.
+4. Keep the answer concise.
+5. If the result contains a count, clearly state the count.
+6. If the result contains rows, summarize the important information.
+"""
+
+    response = model.invoke(prompt)
+
+    content = response.content
+
+    if isinstance(content, list):
+        content = " ".join(
+            str(item)
+            for item in content
+        )
+
+    return str(content).strip()
+
+
+def ask_sql_agent(question: str):
+
+    start_time = time.time()
 
     if not question or not question.strip():
         raise ValueError(
             "Question cannot be empty."
         )
 
-    start_time = time.time()
+    question = question.strip()
 
-    agent = build_agent()
+    sql = generate_sql(question)
 
-    result = agent.invoke(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": question.strip()
-                }
-            ]
-        }
+    result = execute_sql(sql)
+
+    answer = generate_answer(
+        question,
+        sql,
+        result
     )
-
-    messages = result.get(
-        "messages",
-        []
-    )
-
-    final_answer = ""
-
-    for message in reversed(messages):
-
-        text = extract_text(
-            message
-        )
-
-        if text:
-            final_answer = text
-            break
-
-    sql = ""
-
-    for message in messages:
-
-        text = extract_text(
-            message
-        )
-
-        detected_sql = extract_sql(
-            text
-        )
-
-        if detected_sql:
-            sql = detected_sql
-
-    sql = clean_sql(
-        sql
-    )
-
-    database_result = None
-
-    for message in messages:
-
-        tool_name = getattr(
-            message,
-            "name",
-            ""
-        )
-
-        if tool_name == "safe_sql_query":
-
-            database_result = extract_text(
-                message
-            )
-
-            break
 
     execution_time = round(
         time.time() - start_time,
@@ -280,9 +209,9 @@ def ask_sql_agent(question):
     )
 
     return {
-        "question": question.strip(),
-        "sql": sql or None,
-        "result": database_result,
-        "answer": final_answer,
+        "question": question,
+        "sql": sql,
+        "result": result,
+        "answer": answer,
         "execution_time": execution_time
     }

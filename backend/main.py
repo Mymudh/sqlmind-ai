@@ -1,11 +1,16 @@
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .agent import ask_sql_agent
-from .database import get_database_info, get_table_data
+from .database import (
+    get_database_info,
+    get_table_data,
+    check_database,
+    get_db_path
+)
 
 app = FastAPI(
     title="SQLMind AI",
@@ -15,13 +20,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://sqlmind-ai-pi.vercel.app",
-        "https://sqlmind-ai-git-main-mymudhs-projects.vercel.app",
-        "https://sqlmind-j5z9orlio-mymudhs-projects.vercel.app",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -56,16 +55,50 @@ def root():
 
 @app.get("/health")
 def health():
+    database = check_database()
+
     return {
         "status": "healthy",
-        "service": "SQLMind AI"
+        "service": "SQLMind AI",
+        "database": database["exists"],
+        "database_path": database["path"],
+        "database_size": database["size"]
     }
 
 
 @app.get("/database")
 def database():
     try:
-        return get_database_info()
+        database_info = get_database_info()
+
+        return {
+            "status": "connected",
+            **database_info
+        }
+
+    except FileNotFoundError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(error)}"
+        )
+
+
+@app.get("/database/check")
+def database_check():
+    try:
+        database = check_database()
+
+        return {
+            "database": database,
+            "db_path": get_db_path()
+        }
+
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -80,36 +113,32 @@ def database_table(table_name: str):
             table_name,
             limit=20
         )
+
     except ValueError as error:
         raise HTTPException(
             status_code=400,
             detail=str(error)
         )
-    except Exception as error:
+
+    except FileNotFoundError as error:
         raise HTTPException(
             status_code=500,
             detail=str(error)
         )
 
-
-@app.options("/query")
-async def query_options(request: Request):
-    return {
-        "status": "ok"
-    }
-
-
-@app.post(
-    "/query",
-    response_model=QueryResponse
-)
-def query_database(request: QueryRequest):
-    try:
-        result = ask_sql_agent(
-            request.question
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(error)}"
         )
 
-        return result
+
+@app.post("/query", response_model=QueryResponse)
+def query_database(request: QueryRequest):
+    try:
+        return ask_sql_agent(
+            request.question
+        )
 
     except ValueError as error:
         raise HTTPException(

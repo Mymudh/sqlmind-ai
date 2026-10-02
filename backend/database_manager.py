@@ -1,211 +1,138 @@
 import os
-import shutil
 import sqlite3
-import uuid
-from pathlib import Path
+from langchain_community.utilities import SQLDatabase
 
-BASE_DIR = Path(
+BASE_DIR = os.path.dirname(
     os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
+        os.path.abspath(__file__)
     )
 )
 
-DATABASE_DIR = BASE_DIR / "databases"
-DATABASE_DIR.mkdir(
-    parents=True,
-    exist_ok=True
+DB_PATH = os.path.join(
+    BASE_DIR,
+    "chinook.db"
 )
 
-CHINOOK_PATH = BASE_DIR / "chinook.db"
-ACTIVE_DB_FILE = DATABASE_DIR / "active_database.txt"
+
+def get_db_path():
+    return DB_PATH
 
 
-def initialize_database_manager():
-    if not ACTIVE_DB_FILE.exists():
-        ACTIVE_DB_FILE.write_text(
-            str(CHINOOK_PATH),
-            encoding="utf-8"
-        )
-
-
-def get_active_database_path():
-    initialize_database_manager()
-
-    path = Path(
-        ACTIVE_DB_FILE.read_text(
-            encoding="utf-8"
-        ).strip()
-    )
-
-    if not path.exists():
-        ACTIVE_DB_FILE.write_text(
-            str(CHINOOK_PATH),
-            encoding="utf-8"
-        )
-        return CHINOOK_PATH
-
-    return path
-
-
-def set_active_database(path):
-    path = Path(path)
-
-    if not path.exists():
+def check_database():
+    if not os.path.exists(DB_PATH):
         raise FileNotFoundError(
-            "Database file does not exist."
+            f"Database file not found: {DB_PATH}"
         )
 
-    ACTIVE_DB_FILE.write_text(
-        str(path),
-        encoding="utf-8"
+
+def get_database():
+    check_database()
+
+    return SQLDatabase.from_uri(
+        f"sqlite:///{DB_PATH}",
+        sample_rows_in_table_info=3
     )
 
 
-def get_database_name():
-    path = get_active_database_path()
+def get_connection():
+    check_database()
 
-    if path.resolve() == CHINOOK_PATH.resolve():
-        return "Chinook SQLite"
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
 
-    return path.stem
-
-
-def list_databases():
-    initialize_database_manager()
-
-    databases = []
-
-    if CHINOOK_PATH.exists():
-        databases.append({
-            "name": "Chinook SQLite",
-            "filename": "chinook.db",
-            "path": str(CHINOOK_PATH),
-            "type": "sqlite",
-            "is_default": True,
-            "is_active": (
-                get_active_database_path().resolve()
-                == CHINOOK_PATH.resolve()
-            )
-        })
-
-    for file in DATABASE_DIR.iterdir():
-
-        if not file.is_file():
-            continue
-
-        if file.name == "active_database.txt":
-            continue
-
-        if file.suffix.lower() not in {
-            ".db",
-            ".sqlite",
-            ".sqlite3"
-        }:
-            continue
-
-        databases.append({
-            "name": file.stem,
-            "filename": file.name,
-            "path": str(file),
-            "type": "sqlite",
-            "is_default": False,
-            "is_active": (
-                get_active_database_path().resolve()
-                == file.resolve()
-            )
-        })
-
-    return databases
+    return connection
 
 
-def validate_sqlite_database(path):
-    connection = sqlite3.connect(
-        f"file:{path}?mode=ro",
-        uri=True
-    )
+def get_database_info():
+    connection = get_connection()
 
     try:
-        result = connection.execute(
-            """
-            PRAGMA database_list
-            """
-        ).fetchall()
-
-        if not result:
-            raise ValueError(
-                "The uploaded file is not a valid SQLite database."
-            )
-
-        connection.execute(
+        tables = connection.execute(
             """
             SELECT name
             FROM sqlite_master
-            WHERE type='table'
-            LIMIT 1
+            WHERE type = 'table'
+            AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
             """
         ).fetchall()
+
+        result = []
+
+        for table in tables:
+            table_name = table["name"]
+
+            row_count = connection.execute(
+                f'SELECT COUNT(*) FROM "{table_name}"'
+            ).fetchone()[0]
+
+            result.append(
+                {
+                    "name": table_name,
+                    "rows": row_count
+                }
+            )
+
+        return {
+            "database": "Chinook SQLite",
+            "table_count": len(result),
+            "tables": result
+        }
 
     finally:
         connection.close()
 
 
-def save_uploaded_database(source_path, original_filename):
-    extension = Path(
-        original_filename
-    ).suffix.lower()
-
-    allowed_extensions = {
-        ".db",
-        ".sqlite",
-        ".sqlite3"
-    }
-
-    if extension not in allowed_extensions:
-        raise ValueError(
-            "Only .db, .sqlite and .sqlite3 files are supported."
-        )
-
-    unique_name = (
-        f"{Path(original_filename).stem}_"
-        f"{uuid.uuid4().hex[:8]}"
-        f"{extension}"
-    )
-
-    destination = DATABASE_DIR / unique_name
-
-    shutil.copy2(
-        source_path,
-        destination
-    )
+def get_table_data(table_name, limit=20):
+    connection = get_connection()
 
     try:
-        validate_sqlite_database(destination)
-    except Exception:
-        destination.unlink(
-            missing_ok=True
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                AND name NOT LIKE 'sqlite_%'
+                """
+            ).fetchall()
+        }
+
+        if table_name not in tables:
+            raise ValueError(
+                f"Table '{table_name}' does not exist."
+            )
+
+        safe_limit = max(
+            1,
+            min(int(limit), 50)
         )
-        raise ValueError(
-            "The uploaded file is not a valid SQLite database."
-        )
 
-    return destination
+        columns = [
+            row["name"]
+            for row in connection.execute(
+                f'PRAGMA table_info("{table_name}")'
+            ).fetchall()
+        ]
 
+        records = connection.execute(
+            f'SELECT * FROM "{table_name}" LIMIT {safe_limit}'
+        ).fetchall()
 
-def delete_database(path):
-    path = Path(path)
+        total_rows = connection.execute(
+            f'SELECT COUNT(*) FROM "{table_name}"'
+        ).fetchone()[0]
 
-    if path.resolve() == CHINOOK_PATH.resolve():
-        raise ValueError(
-            "The default Chinook database cannot be deleted."
-        )
+        return {
+            "table": table_name,
+            "columns": columns,
+            "rows": [
+                [row[column] for column in columns]
+                for row in records
+            ],
+            "row_count": total_rows
+        }
 
-    if path.resolve() == get_active_database_path().resolve():
-        set_active_database(CHINOOK_PATH)
-
-    if path.exists():
-        path.unlink()
-
-
-initialize_database_manager()
+    finally:
+        connection.close()
