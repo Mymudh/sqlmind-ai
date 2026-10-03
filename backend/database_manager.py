@@ -19,28 +19,37 @@ def get_db_path():
 
 
 def check_database():
-    if not os.path.exists(DB_PATH):
-        raise FileNotFoundError(
-            f"Database file not found: {DB_PATH}"
-        )
-
-
-def get_database():
-    check_database()
-
-    return SQLDatabase.from_uri(
-        f"sqlite:///{DB_PATH}",
-        sample_rows_in_table_info=3
-    )
+    return {
+        "exists": os.path.exists(DB_PATH),
+        "path": DB_PATH,
+        "size": os.path.getsize(DB_PATH)
+        if os.path.exists(DB_PATH)
+        else 0
+    }
 
 
 def get_connection():
-    check_database()
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(
+            f"chinook.db not found at: {DB_PATH}"
+        )
 
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
 
     return connection
+
+
+def get_database():
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(
+            f"chinook.db not found at: {DB_PATH}"
+        )
+
+    return SQLDatabase.from_uri(
+        f"sqlite:///{DB_PATH}",
+        sample_rows_in_table_info=3
+    )
 
 
 def get_database_info():
@@ -66,16 +75,20 @@ def get_database_info():
                 f'SELECT COUNT(*) FROM "{table_name}"'
             ).fetchone()[0]
 
-            result.append(
-                {
-                    "name": table_name,
-                    "rows": row_count
-                }
-            )
+            result.append({
+                "name": table_name,
+                "rows": row_count
+            })
+
+        total_rows = sum(
+            table["rows"]
+            for table in result
+        )
 
         return {
             "database": "Chinook SQLite",
             "table_count": len(result),
+            "total_rows": total_rows,
             "tables": result
         }
 
@@ -83,7 +96,7 @@ def get_database_info():
         connection.close()
 
 
-def get_table_data(table_name, limit=20):
+def get_table_data(table_name, limit=50):
     connection = get_connection()
 
     try:
@@ -106,17 +119,19 @@ def get_table_data(table_name, limit=20):
 
         safe_limit = max(
             1,
-            min(int(limit), 50)
+            min(int(limit), 100)
         )
+
+        columns_info = connection.execute(
+            f'PRAGMA table_info("{table_name}")'
+        ).fetchall()
 
         columns = [
             row["name"]
-            for row in connection.execute(
-                f'PRAGMA table_info("{table_name}")'
-            ).fetchall()
+            for row in columns_info
         ]
 
-        records = connection.execute(
+        rows = connection.execute(
             f'SELECT * FROM "{table_name}" LIMIT {safe_limit}'
         ).fetchall()
 
@@ -124,14 +139,30 @@ def get_table_data(table_name, limit=20):
             f'SELECT COUNT(*) FROM "{table_name}"'
         ).fetchone()[0]
 
+        data = []
+
+        for row in rows:
+            record = {}
+
+            for column in columns:
+                value = row[column]
+
+                if isinstance(value, bytes):
+                    value = value.decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+
+                record[column] = value
+
+            data.append(record)
+
         return {
             "table": table_name,
             "columns": columns,
-            "rows": [
-                [row[column] for column in columns]
-                for row in records
-            ],
-            "row_count": total_rows
+            "rows": data,
+            "row_count": total_rows,
+            "showing": len(data)
         }
 
     finally:

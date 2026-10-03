@@ -1,43 +1,58 @@
-import os
+from pathlib import Path
 import sqlite3
+
 from langchain_community.utilities import SQLDatabase
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(BASE_DIR, "chinook.db")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+DB_CANDIDATES = [
+    BASE_DIR / "databases" / "chinook.db",
+    BASE_DIR / "chinook.db"
+]
 
 
 def get_db_path():
-    return DB_PATH
+    for path in DB_CANDIDATES:
+        if path.is_file():
+            return path
 
+    checked_paths = ", ".join(
+        str(path)
+        for path in DB_CANDIDATES
+    )
 
-def check_database():
-    return {
-        "exists": os.path.exists(DB_PATH),
-        "path": DB_PATH,
-        "size": os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
-    }
+    raise FileNotFoundError(
+        f"Database file not found. Checked: {checked_paths}"
+    )
 
 
 def get_database():
-    if not os.path.exists(DB_PATH):
-        raise FileNotFoundError(
-            f"chinook.db not found at: {DB_PATH}"
-        )
+    db_path = get_db_path().as_posix()
 
     return SQLDatabase.from_uri(
-        f"sqlite:///{DB_PATH}",
-        sample_rows_in_table_info=3
+        f"sqlite:///{db_path}",
+        sample_rows_in_table_info=3,
+        engine_args={
+            "connect_args": {
+                "check_same_thread": False,
+                "timeout": 30
+            }
+        }
     )
 
 
 def get_connection():
-    if not os.path.exists(DB_PATH):
-        raise FileNotFoundError(
-            f"chinook.db not found at: {DB_PATH}"
-        )
+    db_path = get_db_path()
 
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(
+        db_path,
+        timeout=30
+    )
+
     connection.row_factory = sqlite3.Row
+
     return connection
 
 
@@ -50,7 +65,7 @@ def get_database_info():
             SELECT name
             FROM sqlite_master
             WHERE type = 'table'
-            AND name NOT LIKE 'sqlite_%'
+              AND name NOT LIKE 'sqlite_%'
             ORDER BY name
             """
         ).fetchall()
@@ -58,16 +73,18 @@ def get_database_info():
         result = []
 
         for table in tables:
-            table_name = table["name"]
+            name = table["name"]
 
-            row_count = connection.execute(
-                f'SELECT COUNT(*) FROM "{table_name}"'
+            rows = connection.execute(
+                f'SELECT COUNT(*) FROM "{name}"'
             ).fetchone()[0]
 
-            result.append({
-                "name": table_name,
-                "rows": row_count
-            })
+            result.append(
+                {
+                    "name": name,
+                    "rows": rows
+                }
+            )
 
         return {
             "database": "Chinook SQLite",
@@ -79,7 +96,10 @@ def get_database_info():
         connection.close()
 
 
-def get_table_data(table_name, limit=20):
+def get_table_data(
+    table_name,
+    limit=20
+):
     connection = get_connection()
 
     try:
@@ -90,15 +110,25 @@ def get_table_data(table_name, limit=20):
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'table'
-                AND name NOT LIKE 'sqlite_%'
+                  AND name NOT LIKE 'sqlite_%'
                 """
             ).fetchall()
         }
 
         if table_name not in tables:
-            raise ValueError("Invalid table name.")
+            raise ValueError(
+                "Invalid table name."
+            )
 
-        safe_limit = max(1, min(int(limit), 50))
+        try:
+            safe_limit = int(limit)
+        except (TypeError, ValueError):
+            safe_limit = 20
+
+        safe_limit = max(
+            1,
+            min(safe_limit, 50)
+        )
 
         columns = [
             row["name"]
@@ -119,7 +149,10 @@ def get_table_data(table_name, limit=20):
             "table": table_name,
             "columns": columns,
             "rows": [
-                [row[column] for column in columns]
+                [
+                    row[column]
+                    for column in columns
+                ]
                 for row in records
             ],
             "row_count": total_rows

@@ -5,18 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .agent import ask_sql_agent
-from .database import (
-    get_database_info,
-    get_table_data,
-    check_database,
-    get_db_path
-)
+from .database import get_database_info, get_table_data
+
 
 app = FastAPI(
     title="SQLMind AI",
     description="AI-powered Text-to-SQL Agent",
     version="1.0.0"
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,54 +52,21 @@ def root():
 
 @app.get("/health")
 def health():
-    database = check_database()
-
     return {
         "status": "healthy",
-        "service": "SQLMind AI",
-        "database": database["exists"],
-        "database_path": database["path"],
-        "database_size": database["size"]
+        "service": "SQLMind AI"
     }
 
 
 @app.get("/database")
 def database():
     try:
-        database_info = get_database_info()
-
-        return {
-            "status": "connected",
-            **database_info
-        }
-
-    except FileNotFoundError as error:
-        raise HTTPException(
-            status_code=500,
-            detail=str(error)
-        )
+        return get_database_info()
 
     except Exception as error:
         raise HTTPException(
             status_code=500,
-            detail=f"Database error: {str(error)}"
-        )
-
-
-@app.get("/database/check")
-def database_check():
-    try:
-        database = check_database()
-
-        return {
-            "database": database,
-            "db_path": get_db_path()
-        }
-
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=str(error)
+            detail=f"Unable to load database information: {str(error)}"
         )
 
 
@@ -120,25 +84,26 @@ def database_table(table_name: str):
             detail=str(error)
         )
 
-    except FileNotFoundError as error:
-        raise HTTPException(
-            status_code=500,
-            detail=str(error)
-        )
-
     except Exception as error:
         raise HTTPException(
             status_code=500,
-            detail=f"Database error: {str(error)}"
+            detail=f"Unable to load table: {str(error)}"
         )
 
 
-@app.post("/query", response_model=QueryResponse)
-def query_database(request: QueryRequest):
+@app.post(
+    "/query",
+    response_model=QueryResponse
+)
+def query_database(
+    request: QueryRequest
+):
     try:
-        return ask_sql_agent(
-            request.question
+        result = ask_sql_agent(
+            request.question.strip()
         )
+
+        return result
 
     except ValueError as error:
         raise HTTPException(
@@ -153,6 +118,12 @@ def query_database(request: QueryRequest):
             raise HTTPException(
                 status_code=429,
                 detail="AI API quota exceeded. Please try again later."
+            )
+
+        if "OPENAI_API_KEY" in error_message:
+            raise HTTPException(
+                status_code=500,
+                detail="OpenAI API key is not configured on the backend."
             )
 
         raise HTTPException(

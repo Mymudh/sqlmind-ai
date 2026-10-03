@@ -3,13 +3,14 @@ import "./App.css";
 
 const PRODUCTION_API = "https://sqlmind-ai-7c0y.onrender.com";
 
-const API_URL = (
+const LOCAL_API =
   import.meta.env.VITE_API_URL ||
   (window.location.hostname === "localhost" ||
   window.location.hostname === "127.0.0.1"
     ? "http://127.0.0.1:8000"
-    : PRODUCTION_API)
-).replace(/\/+$/, "");
+    : PRODUCTION_API);
+
+const API_URL = LOCAL_API.replace(/\/+$/, "");
 
 const features = [
   {
@@ -93,6 +94,68 @@ const faqs = [
   }
 ];
 
+async function fetchJson(path, options = {}, timeoutMs = 30000) {
+  const urls = [];
+
+  const localUrl = `${API_URL}${path}`;
+
+  urls.push(localUrl);
+
+  if (API_URL !== PRODUCTION_API) {
+    urls.push(`${PRODUCTION_API}${path}`);
+  }
+
+  let lastError = null;
+
+  for (const url of urls) {
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+          ...(options.headers || {})
+        }
+      });
+
+      clearTimeout(timeout);
+
+      let data = null;
+
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      if (!response.ok) {
+        const message =
+          data?.detail ||
+          data?.message ||
+          `Backend returned ${response.status}`;
+
+        throw new Error(message);
+      }
+
+      return {
+        data,
+        url
+      };
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Unable to connect to backend.");
+}
+
 function App() {
   const [question, setQuestion] = useState("");
   const [queryResult, setQueryResult] = useState(null);
@@ -103,40 +166,73 @@ function App() {
   const [databaseLoading, setDatabaseLoading] = useState(true);
   const [databaseError, setDatabaseError] = useState("");
 
+  const [selectedTable, setSelectedTable] = useState("");
+  const [tableData, setTableData] = useState(null);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tableError, setTableError] = useState("");
+
   const [backendOnline, setBackendOnline] = useState(false);
   const [openFaq, setOpenFaq] = useState(0);
 
   const totalRows = useMemo(() => {
-    if (!database?.tables) return 0;
+    if (!database?.tables) {
+      return 0;
+    }
+
     return database.tables.reduce(
       (total, table) => total + Number(table.rows || 0),
       0
     );
   }, [database]);
 
+  const scrollTo = (id) => {
+    const element = document.getElementById(id);
+
+    if (!element) {
+      return;
+    }
+
+    const navbarHeight = 76;
+
+    const top =
+      element.getBoundingClientRect().top +
+      window.scrollY -
+      navbarHeight;
+
+    window.scrollTo({
+      top,
+      behavior: "smooth"
+    });
+  };
+
+  const checkBackend = async () => {
+    try {
+      await fetchJson(
+        "/health",
+        {
+          method: "GET"
+        },
+        15000
+      );
+
+      setBackendOnline(true);
+    } catch {
+      setBackendOnline(false);
+    }
+  };
+
   const fetchDatabase = async () => {
     setDatabaseLoading(true);
     setDatabaseError("");
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20000);
-
-      const response = await fetch(`${API_URL}/database`, {
-        method: "GET",
-        signal: controller.signal,
-        headers: {
-          Accept: "application/json"
-        }
-      });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        throw new Error(`Backend returned ${response.status}`);
-      }
-
-      const data = await response.json();
+      const { data } = await fetchJson(
+        "/database",
+        {
+          method: "GET"
+        },
+        30000
+      );
 
       if (!data || !Array.isArray(data.tables)) {
         throw new Error("Invalid database response.");
@@ -144,39 +240,58 @@ function App() {
 
       setDatabase(data);
       setBackendOnline(true);
+
+      if (data.tables.length > 0) {
+        const firstTable = data.tables[0]?.name;
+
+        if (firstTable) {
+          await loadTable(firstTable);
+        }
+      }
     } catch (error) {
       setBackendOnline(false);
-
-      if (error.name === "AbortError") {
-        setDatabaseError("Backend request timed out.");
-      } else {
-        setDatabaseError(
-          error.message || "Database information could not be loaded."
-        );
-      }
+      setDatabaseError(
+        error?.name === "AbortError"
+          ? "Backend request timed out."
+          : error?.message || "Database information could not be loaded."
+      );
     } finally {
       setDatabaseLoading(false);
     }
   };
 
-  const checkBackend = async () => {
+  const loadTable = async (tableName) => {
+    if (!tableName) {
+      return;
+    }
+
+    setSelectedTable(tableName);
+    setTableLoading(true);
+    setTableError("");
+    setTableData(null);
+
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      const { data } = await fetchJson(
+        `/database/${encodeURIComponent(tableName)}`,
+        {
+          method: "GET"
+        },
+        30000
+      );
 
-      const response = await fetch(`${API_URL}/health`, {
-        signal: controller.signal
-      });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        throw new Error("Backend offline");
+      if (!data) {
+        throw new Error("Invalid table response.");
       }
 
+      setTableData(data);
       setBackendOnline(true);
-    } catch {
+    } catch (error) {
       setBackendOnline(false);
+      setTableError(
+        error?.message || "Unable to load table data."
+      );
+    } finally {
+      setTableLoading(false);
     }
   };
 
@@ -186,7 +301,9 @@ function App() {
   }, []);
 
   const executeQuery = async (customQuestion) => {
-    const finalQuestion = (customQuestion ?? question).trim();
+    const finalQuestion = (
+      customQuestion !== undefined ? customQuestion : question
+    ).trim();
 
     if (!finalQuestion) {
       setQueryError("Please enter a database question.");
@@ -199,57 +316,58 @@ function App() {
     setQueryResult(null);
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 90000);
-
-      const response = await fetch(`${API_URL}/query`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json"
+      const { data } = await fetchJson(
+        "/query",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            question: finalQuestion
+          })
         },
-        signal: controller.signal,
-        body: JSON.stringify({
-          question: finalQuestion
-        })
-      });
+        120000
+      );
 
-      clearTimeout(timeout);
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data?.detail || `Request failed with status ${response.status}`
-        );
+      if (!data) {
+        throw new Error("Empty response from backend.");
       }
 
       setQueryResult(data);
       setBackendOnline(true);
+
+      setTimeout(() => {
+        document
+          .getElementById("query-result")
+          ?.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+          });
+      }, 100);
     } catch (error) {
       setBackendOnline(false);
 
-      if (error.name === "AbortError") {
+      if (error?.name === "AbortError") {
         setQueryError(
           "The request took too long. The backend may be waking up. Please try again."
         );
       } else {
-        setQueryError(error.message || "Request failed.");
+        setQueryError(
+          error?.message || "Unable to get a response from SQLMind."
+        );
       }
     } finally {
       setQueryLoading(false);
     }
   };
 
-  const scrollTo = (id) => {
-    document.getElementById(id)?.scrollIntoView({
-      behavior: "smooth",
-      block: "start"
-    });
-  };
-
   const handleKeyDown = (event) => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    if (
+      event.key === "Enter" &&
+      (event.ctrlKey || event.metaKey)
+    ) {
+      event.preventDefault();
       executeQuery();
     }
   };
@@ -258,24 +376,64 @@ function App() {
     <div className="app">
       <header className="navbar">
         <div className="nav-inner">
-          <button className="brand" onClick={() => scrollTo("home")}>
-            <div className="brand-icon">SQL</div>
+          <button
+            className="brand"
+            onClick={() => scrollTo("home")}
+            type="button"
+          >
+            <div className="brand-icon">
+              SQL
+              <span>AI</span>
+            </div>
+
             <div>
               <div className="brand-name">SQLMind AI</div>
-              <div className="brand-subtitle">AI-Powered Data Analyst</div>
+
+              <div className="brand-subtitle">
+                AI-Powered Data Analyst
+              </div>
             </div>
           </button>
 
           <nav className="nav-links">
-            <button onClick={() => scrollTo("features")}>Features</button>
-            <button onClick={() => scrollTo("use-cases")}>Use Cases</button>
-            <button onClick={() => scrollTo("preview")}>Preview</button>
-            <button onClick={() => scrollTo("faq")}>FAQ</button>
+            <button
+              onClick={() => scrollTo("features")}
+              type="button"
+            >
+              Features
+            </button>
+
+            <button
+              onClick={() => scrollTo("use-cases")}
+              type="button"
+            >
+              Use Cases
+            </button>
+
+            <button
+              onClick={() => scrollTo("preview")}
+              type="button"
+            >
+              Preview
+            </button>
+
+            <button
+              onClick={() => scrollTo("faq")}
+              type="button"
+            >
+              FAQ
+            </button>
           </nav>
 
-          <div className={`backend-status ${backendOnline ? "online" : "offline"}`}>
+          <div
+            className={`backend-status ${
+              backendOnline ? "online" : "offline"
+            }`}
+          >
             <span />
-            {backendOnline ? "Backend Online" : "Backend Offline"}
+            {backendOnline
+              ? "Backend Online"
+              : "Backend Offline"}
           </div>
         </div>
       </header>
@@ -299,15 +457,16 @@ function App() {
             </h1>
 
             <p className="hero-description">
-              Transform natural-language questions into safe SQL, execute them
-              against your database, and receive intelligent AI-powered
-              answers.
+              Transform natural-language questions into safe SQL,
+              execute them against your database, and receive
+              intelligent AI-powered answers.
             </p>
 
             <div className="hero-actions">
               <button
                 className="primary-button"
                 onClick={() => scrollTo("query")}
+                type="button"
               >
                 Start Query <span>→</span>
               </button>
@@ -315,104 +474,177 @@ function App() {
               <button
                 className="secondary-button"
                 onClick={() => scrollTo("database")}
+                type="button"
               >
                 Explore Database
               </button>
             </div>
 
-            <div className="hero-ready">
-              <span />
-              SQLMind Agent
-              <small>Ctrl + Enter</small>
+            <div className="hero-stats">
+              <div>
+                <strong>
+                  {database?.table_count || 11}
+                </strong>
+                <span>Tables</span>
+              </div>
+
+              <div>
+                <strong>AI</strong>
+                <span>SQL Agent</span>
+              </div>
+
+              <div>
+                <strong>100%</strong>
+                <span>Read Only</span>
+              </div>
             </div>
           </div>
 
           <div className="hero-visual">
-            <div className="orbital-system">
+            <div className="scene">
+              <div className="scene-glow" />
+
               <div className="orbit orbit-one" />
               <div className="orbit orbit-two" />
               <div className="orbit orbit-three" />
-              <div className="orbit orbit-four" />
 
-              <div className="orbit-dot dot-one" />
-              <div className="orbit-dot dot-two" />
-              <div className="orbit-dot dot-three" />
-              <div className="orbit-dot dot-four" />
-
-              <div className="ai-core">
-                <div className="core-glow" />
-                <div className="core-face">AI</div>
+              <div className="floating-node node-one">
+                SQL
               </div>
 
-              <div className="floating-card floating-sql">SQL</div>
-              <div className="floating-card floating-ai">AI</div>
-              <div className="floating-card floating-query">QUERY</div>
-              <div className="floating-card floating-db">DATABASE</div>
+              <div className="floating-node node-two">
+                AI
+              </div>
 
-              <div className="data-particle particle-one" />
-              <div className="data-particle particle-two" />
-              <div className="data-particle particle-three" />
-              <div className="data-particle particle-four" />
-              <div className="data-particle particle-five" />
-              <div className="data-particle particle-six" />
+              <div className="floating-node node-three">
+                DB
+              </div>
+
+              <div className="floating-node node-four">
+                RAG
+              </div>
+
+              <div className="database-stack">
+                <div className="db-layer layer-top">
+                  <span>SQL</span>
+                </div>
+
+                <div className="db-layer layer-middle">
+                  <span>QUERY</span>
+                </div>
+
+                <div className="db-layer layer-bottom">
+                  <span>DATABASE</span>
+                </div>
+
+                <div className="db-core">
+                  <div className="core-ring" />
+                  <div className="core-face">
+                    AI
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section id="features" className="section feature-section">
+        <section
+          id="features"
+          className="section feature-section"
+        >
           <div className="section-heading">
-            <div className="section-label">INTELLIGENT DATA INTERACTION</div>
+            <div className="section-label">
+              INTELLIGENT DATA INTERACTION
+            </div>
+
             <h2>From question to insight.</h2>
+
             <p>
-              SQLMind connects natural language, AI agents, database tools and
-              secure SQL execution.
+              SQLMind connects natural language, AI agents,
+              database tools and secure SQL execution.
             </p>
           </div>
 
           <div className="feature-grid">
             {features.map((feature) => (
-              <div className="feature-card" key={feature.number}>
-                <div className="feature-icon">{feature.icon}</div>
-                <div className="feature-number">{feature.number}</div>
+              <div
+                className="feature-card"
+                key={feature.number}
+              >
+                <div className="feature-icon">
+                  {feature.icon}
+                </div>
+
+                <div className="feature-number">
+                  {feature.number}
+                </div>
+
                 <h3>{feature.title}</h3>
+
                 <p>{feature.text}</p>
               </div>
             ))}
           </div>
         </section>
 
-        <section id="use-cases" className="section workflow-section">
+        <section
+          id="use-cases"
+          className="section workflow-section"
+        >
           <div className="section-heading">
-            <div className="section-label">HOW IT WORKS</div>
+            <div className="section-label">
+              HOW IT WORKS
+            </div>
+
             <h2>
               From natural language to
               <br />
               answer.
             </h2>
+
             <p>
-              SQLMind turns a simple question into a validated database result.
+              SQLMind turns a simple question into a
+              validated database result.
             </p>
           </div>
 
           <div className="workflow-grid">
             {workflow.map((item, index) => (
-              <div className="workflow-card" key={item.title}>
+              <div
+                className="workflow-card"
+                key={item.title}
+              >
                 <div className="workflow-number">
                   {String(index + 1).padStart(2, "0")}
                 </div>
-                <div className="workflow-icon">{item.icon}</div>
+
+                <div className="workflow-icon">
+                  {item.icon}
+                </div>
+
                 <h3>{item.title}</h3>
+
                 <p>{item.text}</p>
               </div>
             ))}
           </div>
         </section>
 
-        <section id="preview" className="section preview-section">
+        <section
+          id="preview"
+          className="section preview-section"
+        >
           <div className="section-heading">
-            <div className="section-label">PRODUCT PREVIEW</div>
+            <div className="section-label">
+              PRODUCT PREVIEW
+            </div>
+
             <h2>See SQLMind think.</h2>
-            <p>From natural-language questions to safe SQL and database insights.</p>
+
+            <p>
+              From natural-language questions to safe SQL
+              and database insights.
+            </p>
           </div>
 
           <div className="preview-grid">
@@ -423,18 +655,27 @@ function App() {
                   <span />
                   <span />
                 </div>
+
                 <span>SQLMind AI</span>
               </div>
 
               <div className="preview-content">
-                <div className="mini-label">NATURAL LANGUAGE</div>
-                <h3>Which customers spent the most?</h3>
+                <div className="mini-label">
+                  NATURAL LANGUAGE
+                </div>
+
+                <h3>
+                  Which customers spent the most?
+                </h3>
 
                 <button
                   className="preview-input"
                   onClick={() =>
-                    executeQuery("Which customers spent the most?")
+                    executeQuery(
+                      "Which customers spent the most?"
+                    )
                   }
+                  type="button"
                 >
                   Ask SQLMind <span>→</span>
                 </button>
@@ -453,17 +694,32 @@ function App() {
                   <span />
                   <span />
                 </div>
+
                 <span>AI Agent</span>
               </div>
 
               <div className="agent-steps">
-                <div>✓ Understanding database schema</div>
-                <div>✓ Generating safe SQL</div>
-                <div>✓ Validating query</div>
-                <div>✓ Executing read-only query</div>
+                <div>
+                  ✓ Understanding database schema
+                </div>
+
+                <div>
+                  ✓ Generating safe SQL
+                </div>
+
+                <div>
+                  ✓ Validating query
+                </div>
+
+                <div>
+                  ✓ Executing read-only query
+                </div>
+
                 <div className="agent-result">
                   {database
-                    ? `${database.tables?.length || 0} database tables connected`
+                    ? `${
+                        database.tables?.length || 0
+                      } database tables connected`
                     : "Database connection"}
                 </div>
               </div>
@@ -476,6 +732,7 @@ function App() {
                   <span />
                   <span />
                 </div>
+
                 <span>Generated SQL</span>
               </div>
 
@@ -489,17 +746,27 @@ GROUP BY CustomerId
 ORDER BY spending DESC;`}
               </pre>
 
-              <div className="readonly-badge">READ ONLY</div>
+              <div className="readonly-badge">
+                READ ONLY
+              </div>
             </div>
           </div>
         </section>
 
-        <section id="query" className="section query-section">
+        <section
+          id="query"
+          className="section query-section"
+        >
           <div className="section-heading query-heading">
-            <div className="section-label">AI DATA WORKSPACE</div>
+            <div className="section-label">
+              AI DATA WORKSPACE
+            </div>
+
             <h2>Query your database.</h2>
+
             <p>
-              Ask SQLMind a question and let the agent generate and execute SQL.
+              Ask SQLMind a question and let the agent
+              generate and execute SQL.
             </p>
           </div>
 
@@ -509,50 +776,120 @@ ORDER BY spending DESC;`}
                 <span />
                 SQLMind Agent Ready
               </div>
-              <div className="keyboard-hint">Ctrl + Enter</div>
+
+              <div className="keyboard-hint">
+                Ctrl + Enter
+              </div>
             </div>
 
-            <div className="query-input-row">
-              <div className="query-symbol">✦</div>
+            <div className="professional-search">
+              <div className="search-top">
+                <div className="search-label">
+                  <span className="search-icon">
+                    ⌕
+                  </span>
 
-              <input
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask your database anything..."
-              />
+                  NATURAL LANGUAGE QUERY
+                </div>
 
-              <button
-                className="primary-button query-button"
-                onClick={() => executeQuery()}
-                disabled={queryLoading}
-              >
-                {queryLoading ? "Thinking..." : "Ask"} <span>→</span>
-              </button>
-            </div>
+                <span className="character-count">
+                  {question.length}/2000
+                </span>
+              </div>
 
-            <div className="suggestion-row">
-              <button onClick={() => setQuestion("How many customers?")}>
-                How many customers?
-              </button>
-              <button onClick={() => setQuestion("Who is the top artist?")}>
-                Top artist
-              </button>
-              <button onClick={() => setQuestion("How many invoices are there?")}>
-                Invoice count
-              </button>
-              <button onClick={() => setQuestion("How many tracks are there?")}>
-                Track count
-              </button>
+              <div className="search-input-wrap">
+                <input
+                  value={question}
+                  onChange={(event) =>
+                    setQuestion(event.target.value)
+                  }
+                  onKeyDown={handleKeyDown}
+                  maxLength={2000}
+                  placeholder="Ask your database anything..."
+                  aria-label="Ask your database"
+                />
+
+                <button
+                  className="search-submit"
+                  onClick={() => executeQuery()}
+                  disabled={
+                    queryLoading || !question.trim()
+                  }
+                  type="button"
+                >
+                  {queryLoading ? (
+                    <>
+                      <span className="button-loader" />
+                      Thinking
+                    </>
+                  ) : (
+                    <>
+                      Ask SQLMind
+                      <span>→</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="search-suggestions">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQuestion(
+                      "How many customers are there?"
+                    )
+                  }
+                >
+                  Customer count
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQuestion(
+                      "Which customers spent the most?"
+                    )
+                  }
+                >
+                  Top customers
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQuestion(
+                      "What are the top 10 tracks by price?"
+                    )
+                  }
+                >
+                  Top tracks
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQuestion(
+                      "How many invoices are there?"
+                    )
+                  }
+                >
+                  Invoice count
+                </button>
+              </div>
             </div>
 
             <div className="query-panel-bottom">
-              <span>Natural language → SQL → Database → Answer</span>
+              <span>
+                Natural language → SQL → Database → Answer
+              </span>
 
               <button
                 className="secondary-button"
                 onClick={() => executeQuery()}
-                disabled={queryLoading}
+                disabled={
+                  queryLoading || !question.trim()
+                }
+                type="button"
               >
                 Ask SQLMind <span>→</span>
               </button>
@@ -561,61 +898,103 @@ ORDER BY spending DESC;`}
 
           {queryError && (
             <div className="error-panel">
-              <div className="error-icon">!</div>
+              <div className="error-icon">
+                !
+              </div>
+
               <div>
                 <strong>Request failed</strong>
+
                 <p>{queryError}</p>
               </div>
             </div>
           )}
 
           {queryResult && (
-            <div className="query-result">
+            <div
+              id="query-result"
+              className="query-result"
+            >
               <div className="result-header">
                 <div>
-                  <div className="section-label">AI RESPONSE</div>
+                  <div className="section-label">
+                    AI RESPONSE
+                  </div>
+
                   <h3>Database insight</h3>
                 </div>
+
                 <div className="execution-time">
-                  {Number(queryResult.execution_time || 0).toFixed(2)}s
+                  {Number(
+                    queryResult.execution_time || 0
+                  ).toFixed(2)}
+                  s
                 </div>
               </div>
 
               <div className="result-answer">
-                {queryResult.answer}
+                {queryResult.answer ||
+                  "SQLMind returned a result."}
               </div>
 
               {queryResult.sql && (
                 <div className="result-block">
-                  <div className="result-block-title">GENERATED SQL</div>
-                  <pre>{queryResult.sql}</pre>
+                  <div className="result-block-title">
+                    GENERATED SQL
+                  </div>
+
+                  <pre>
+                    {queryResult.sql}
+                  </pre>
                 </div>
               )}
 
-              {queryResult.result && (
+              {Array.isArray(queryResult.result) && (
                 <div className="result-block">
-                  <div className="result-block-title">DATABASE RESULT</div>
-                  <pre>{JSON.stringify(queryResult.result, null, 2)}</pre>
+                  <div className="result-block-title">
+                    DATABASE RESULT
+                  </div>
+
+                  <pre>
+                    {JSON.stringify(
+                      queryResult.result,
+                      null,
+                      2
+                    )}
+                  </pre>
                 </div>
               )}
             </div>
           )}
         </section>
 
-        <section id="database" className="section database-section">
+        <section
+          id="database"
+          className="section database-section"
+        >
           <div className="database-header">
             <div>
-              <div className="section-label">DATABASE</div>
+              <div className="section-label">
+                CONNECTED DATABASE
+              </div>
+
               <h2>Chinook SQLite.</h2>
-              <p>Explore the database connected to SQLMind AI.</p>
+
+              <p>
+                Explore tables, columns and real records
+                connected to SQLMind AI.
+              </p>
             </div>
 
             <button
               className="secondary-button"
               onClick={fetchDatabase}
               disabled={databaseLoading}
+              type="button"
             >
-              {databaseLoading ? "Loading..." : "Refresh Database"}
+              {databaseLoading
+                ? "Loading..."
+                : "Refresh Database"}
             </button>
           </div>
 
@@ -623,27 +1002,42 @@ ORDER BY spending DESC;`}
             {databaseLoading ? (
               <div className="database-loading">
                 <div className="loader" />
+
                 <div>
-                  <strong>Connecting to database...</strong>
+                  <strong>
+                    Connecting to database...
+                  </strong>
+
                   <p>
-                    Loading schema information from the SQLMind backend.
+                    Loading schema information from the
+                    SQLMind backend.
                   </p>
                 </div>
               </div>
             ) : databaseError ? (
               <div className="database-error">
-                <div className="database-error-icon">!</div>
+                <div className="database-error-icon">
+                  !
+                </div>
 
                 <div>
-                  <strong>Database unavailable</strong>
+                  <strong>
+                    Database unavailable
+                  </strong>
+
                   <p>
-                    Database information could not be loaded from the backend.
+                    Database information could not be
+                    loaded from the backend.
                   </p>
-                  <small>{databaseError}</small>
+
+                  <small>
+                    {databaseError}
+                  </small>
 
                   <button
                     className="primary-button retry-button"
                     onClick={fetchDatabase}
+                    type="button"
                   >
                     Try Again
                   </button>
@@ -654,48 +1048,222 @@ ORDER BY spending DESC;`}
                 <div className="database-stats">
                   <div>
                     <span>Database</span>
-                    <strong>{database.database || "Chinook SQLite"}</strong>
+
+                    <strong>
+                      {database.database ||
+                        "Chinook SQLite"}
+                    </strong>
                   </div>
 
                   <div>
                     <span>Tables</span>
-                    <strong>{database.table_count || 0}</strong>
+
+                    <strong>
+                      {database.table_count || 0}
+                    </strong>
                   </div>
 
                   <div>
                     <span>Total Rows</span>
-                    <strong>{totalRows.toLocaleString()}</strong>
+
+                    <strong>
+                      {totalRows.toLocaleString()}
+                    </strong>
                   </div>
 
                   <div>
                     <span>Status</span>
-                    <strong className="status-text">Connected</strong>
+
+                    <strong className="status-text">
+                      Connected
+                    </strong>
                   </div>
                 </div>
 
-                <div className="table-list">
-                  {database.tables.map((table) => (
-                    <div className="table-row" key={table.name}>
-                      <div className="table-name">
-                        <div className="table-icon">DB</div>
-                        <span>{table.name}</span>
+                <div className="database-browser">
+                  <div className="table-list">
+                    <div className="table-list-title">
+                      TABLES
+                    </div>
+
+                    {database.tables.map((table) => (
+                      <button
+                        className={`table-row ${
+                          selectedTable === table.name
+                            ? "active"
+                            : ""
+                        }`}
+                        key={table.name}
+                        onClick={() =>
+                          loadTable(table.name)
+                        }
+                        type="button"
+                      >
+                        <div className="table-name">
+                          <div className="table-icon">
+                            DB
+                          </div>
+
+                          <span>
+                            {table.name}
+                          </span>
+                        </div>
+
+                        <div className="table-rows">
+                          {Number(
+                            table.rows || 0
+                          ).toLocaleString()}{" "}
+                          rows
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="table-preview">
+                    <div className="table-preview-header">
+                      <div>
+                        <div className="section-label">
+                          TABLE DATA
+                        </div>
+
+                        <h3>
+                          {selectedTable ||
+                            "Select a table"}
+                        </h3>
                       </div>
 
-                      <div className="table-rows">
-                        {Number(table.rows).toLocaleString()} rows
-                      </div>
+                      {tableData && (
+                        <span>
+                          {Number(
+                            tableData.row_count || 0
+                          ).toLocaleString()}{" "}
+                          total rows
+                        </span>
+                      )}
                     </div>
-                  ))}
+
+                    {tableLoading ? (
+                      <div className="table-loading">
+                        <div className="loader" />
+
+                        <span>
+                          Loading real database records...
+                        </span>
+                      </div>
+                    ) : tableError ? (
+                      <div className="table-data-error">
+                        <strong>
+                          Unable to load table
+                        </strong>
+
+                        <p>{tableError}</p>
+                      </div>
+                    ) : tableData &&
+                      Array.isArray(
+                        tableData.columns
+                      ) &&
+                      Array.isArray(
+                        tableData.rows
+                      ) ? (
+                      <div className="table-scroll">
+                        <table>
+                          <thead>
+                            <tr>
+                              {tableData.columns.map(
+                                (column) => (
+                                  <th key={column}>
+                                    {column}
+                                  </th>
+                                )
+                              )}
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {tableData.rows.length >
+                            0 ? (
+                              tableData.rows.map(
+                                (row, rowIndex) => (
+                                  <tr
+                                    key={`${selectedTable}-${rowIndex}`}
+                                  >
+                                    {tableData.columns.map(
+                                      (
+                                        column,
+                                        columnIndex
+                                      ) => (
+                                        <td
+                                          key={`${column}-${columnIndex}`}
+                                        >
+                                          {row[
+                                            columnIndex
+                                          ] === null ||
+                                          row[
+                                            columnIndex
+                                          ] ===
+                                            undefined
+                                            ? "NULL"
+                                            : String(
+                                                row[
+                                                  columnIndex
+                                                ]
+                                              )}
+                                        </td>
+                                      )
+                                    )}
+                                  </tr>
+                                )
+                              )
+                            ) : (
+                              <tr>
+                                <td
+                                  colSpan={
+                                    tableData.columns
+                                      .length
+                                  }
+                                  className="empty-table"
+                                >
+                                  No records found.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="table-empty-state">
+                        <div className="table-empty-icon">
+                          DB
+                        </div>
+
+                        <strong>
+                          Select a table
+                        </strong>
+
+                        <p>
+                          Click any table on the left
+                          to view its real database
+                          records.
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </>
             )}
           </div>
         </section>
 
-        <section id="faq" className="section faq-section">
+        <section
+          id="faq"
+          className="section faq-section"
+        >
           <div className="faq-layout">
             <div className="faq-title">
-              <div className="section-label">FAQ</div>
+              <div className="section-label">
+                FAQ
+              </div>
+
               <h2>
                 Frequently
                 <br />
@@ -703,26 +1271,40 @@ ORDER BY spending DESC;`}
                 <br />
                 questions.
               </h2>
-              <p>Everything you need to know about SQLMind AI.</p>
+
+              <p>
+                Everything you need to know about
+                SQLMind AI.
+              </p>
             </div>
 
             <div className="faq-list">
               {faqs.map((faq, index) => (
                 <div
-                  className={`faq-item ${openFaq === index ? "open" : ""}`}
+                  className={`faq-item ${
+                    openFaq === index ? "open" : ""
+                  }`}
                   key={faq.question}
                 >
                   <button
                     onClick={() =>
-                      setOpenFaq(openFaq === index ? -1 : index)
+                      setOpenFaq(
+                        openFaq === index ? -1 : index
+                      )
                     }
+                    type="button"
                   >
                     <span>{faq.question}</span>
-                    <span>{openFaq === index ? "−" : "+"}</span>
+
+                    <span>
+                      {openFaq === index ? "−" : "+"}
+                    </span>
                   </button>
 
                   {openFaq === index && (
-                    <div className="faq-answer">{faq.answer}</div>
+                    <div className="faq-answer">
+                      {faq.answer}
+                    </div>
                   )}
                 </div>
               ))}
@@ -733,7 +1315,9 @@ ORDER BY spending DESC;`}
         <section className="section cta-section">
           <div className="cta-glow" />
 
-          <div className="section-label">READY TO QUERY?</div>
+          <div className="section-label">
+            READY TO QUERY?
+          </div>
 
           <h2>
             Ask your database
@@ -741,11 +1325,15 @@ ORDER BY spending DESC;`}
             anything.
           </h2>
 
-          <p>Turn natural-language questions into intelligent database insights.</p>
+          <p>
+            Turn natural-language questions into
+            intelligent database insights.
+          </p>
 
           <button
             className="primary-button cta-button"
             onClick={() => scrollTo("query")}
+            type="button"
           >
             Start Query <span>→</span>
           </button>
@@ -754,16 +1342,30 @@ ORDER BY spending DESC;`}
 
       <footer className="footer">
         <div className="footer-brand">
-          <div className="brand-icon">SQL</div>
+          <div className="brand-icon">
+            SQL
+            <span>AI</span>
+          </div>
+
           <div>
             <strong>SQLMind AI</strong>
-            <span>AI-Powered Data Analyst</span>
+
+            <span>
+              AI-Powered Data Analyst
+            </span>
           </div>
         </div>
 
-        <div className={`footer-status ${backendOnline ? "online" : "offline"}`}>
+        <div
+          className={`footer-status ${
+            backendOnline ? "online" : "offline"
+          }`}
+        >
           <span />
-          {backendOnline ? "Backend Online" : "Backend Offline"}
+
+          {backendOnline
+            ? "Backend Online"
+            : "Backend Offline"}
         </div>
 
         <div className="footer-tech">

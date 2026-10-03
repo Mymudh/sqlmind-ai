@@ -12,42 +12,79 @@ FORBIDDEN_SQL_KEYWORDS = {
     "REPLACE",
     "ATTACH",
     "DETACH",
-    "PRAGMA"
+    "PRAGMA",
 }
 
 
-def validate_sql(sql: str) -> tuple[bool, str]:
+def clean_sql(sql):
+    if not sql:
+        return ""
 
+    sql = str(sql).strip()
+
+    sql = re.sub(
+        r"^```sql\s*",
+        "",
+        sql,
+        flags=re.IGNORECASE
+    )
+
+    sql = re.sub(
+        r"^```\s*",
+        "",
+        sql
+    )
+
+    sql = re.sub(
+        r"\s*```$",
+        "",
+        sql
+    )
+
+    sql = sql.strip()
+
+    return sql
+
+
+def validate_sql(sql):
     if not sql or not sql.strip():
         return False, "SQL query is empty."
 
-    cleaned_sql = sql.strip()
+    cleaned_sql = clean_sql(sql)
 
     normalized_sql = re.sub(
         r"\s+",
         " ",
         cleaned_sql
-    ).upper()
+    ).strip()
 
-    if not normalized_sql.startswith("SELECT"):
+    normalized_upper = normalized_sql.upper()
+
+    if not normalized_upper.startswith("SELECT"):
         return False, "Only SELECT queries are allowed."
 
     for keyword in FORBIDDEN_SQL_KEYWORDS:
-
         pattern = rf"\b{keyword}\b"
 
         if re.search(
             pattern,
-            normalized_sql
+            normalized_upper
         ):
-            return (
-                False,
+            return False, (
                 f"Forbidden SQL operation detected: {keyword}"
             )
 
-    if ";" in cleaned_sql.rstrip(";"):
-        return (
-            False,
+    statement_without_final_semicolon = (
+        normalized_sql.rstrip()
+    )
+
+    if statement_without_final_semicolon.endswith(";"):
+        statement_without_final_semicolon = (
+            statement_without_final_semicolon[:-1]
+        )
+
+    if ";" in statement_without_final_semicolon:
+        return False, (
             "Multiple SQL statements are not allowed."
         )
 
