@@ -425,16 +425,6 @@ function App() {
             </button>
           </nav>
 
-          <div
-            className={`backend-status ${
-              backendOnline ? "online" : "offline"
-            }`}
-          >
-            <span />
-            {backendOnline
-              ? "Backend Online"
-              : "Backend Offline"}
-          </div>
         </div>
       </header>
 
@@ -1356,17 +1346,6 @@ ORDER BY spending DESC;`}
           </div>
         </div>
 
-        <div
-          className={`footer-status ${
-            backendOnline ? "online" : "offline"
-          }`}
-        >
-          <span />
-
-          {backendOnline
-            ? "Backend Online"
-            : "Backend Offline"}
-        </div>
 
         <div className="footer-tech">
           Built with FastAPI, Gemini, React and SQLite.

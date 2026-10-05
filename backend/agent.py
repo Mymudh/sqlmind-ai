@@ -16,12 +16,19 @@ ENV_FILE = BASE_DIR / ".env"
 
 load_dotenv(ENV_FILE, override=True)
 
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
-    "gemini-3.1-flash-lite"
+    "gemini-3.5-flash"
 )
+
+GEMINI_FALLBACK_MODEL = os.getenv(
+    "GEMINI_FALLBACK_MODEL",
+    "gemini-3.5-flash-lite"
+)
+
 
 if not GEMINI_API_KEY:
     raise RuntimeError(
@@ -29,9 +36,45 @@ if not GEMINI_API_KEY:
         f"Expected GEMINI_API_KEY or GOOGLE_API_KEY in: {ENV_FILE}"
     )
 
+
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
+
+
+def generate_with_fallback(
+    prompt: str
+) -> Any:
+    try:
+        return client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt
+        )
+
+    except Exception as primary_error:
+        error_text = str(primary_error).upper()
+
+        temporary_error = (
+            "503" in error_text
+            or "UNAVAILABLE" in error_text
+            or "HIGH DEMAND" in error_text
+            or "RESOURCE_EXHAUSTED" in error_text
+            or "429" in error_text
+        )
+
+        if not temporary_error or not GEMINI_FALLBACK_MODEL:
+            raise
+
+        time.sleep(1)
+
+        try:
+            return client.models.generate_content(
+                model=GEMINI_FALLBACK_MODEL,
+                contents=prompt
+            )
+
+        except Exception:
+            raise primary_error
 
 
 FORBIDDEN_SQL_WORDS = {
@@ -320,9 +363,8 @@ LIMIT 5
 Return ONLY the SQL query.
 """
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt
+    response = generate_with_fallback(
+        prompt
     )
 
     text = response.text
@@ -488,14 +530,14 @@ RULES:
 Return only the natural-language answer.
 """
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt
+    response = generate_with_fallback(
+        prompt
     )
 
     answer = response.text
 
     if not answer:
+
         if not result:
             return "No matching records were found."
 
