@@ -1,4 +1,3 @@
-```
 *{
   box-sizing:border-box;
 }
@@ -38,6 +37,8 @@ body{
   overflow-x:hidden;
   overflow-y:auto;
   overscroll-behavior-y:auto;
+  -webkit-overflow-scrolling:touch;
+  scroll-behavior:smooth;
 }
 
 body,button,input{
@@ -1915,5 +1916,3 @@ div{
     transition:none!important;
   }
 }
-
-```
